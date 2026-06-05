@@ -1,0 +1,57 @@
+version: 2
+
+sources:
+  - name: tpch
+    description: "TPC-H 벤치마크 데이터셋 (Snowflake 샘플 DB)"
+    database: SNOWFLAKE_SAMPLE_DATA
+    schema: TPCH_SF1
+    tables:
+      - name: orders
+        columns:
+          - name: O_ORDERKEY
+            tests: [unique, not_null]
+          - name: O_CUSTKEY
+          - name: O_ORDERSTATUS
+          - name: O_TOTALPRICE
+          - name: O_ORDERDATE
+          - name: O_ORDERPRIORITY
+
+      - name: customer
+        columns:
+          - name: C_CUSTKEY
+            tests: [unique, not_null]
+          - name: C_NAME
+          - name: C_ACCTBAL
+          - name: C_MKTSEGMENT
+          - name: C_NATIONKEY
+
+      - name: lineitem
+        columns:
+          - name: L_ORDERKEY
+          - name: L_PARTKEY
+          - name: L_SUPPKEY
+          - name: L_LINENUMBER
+          - name: L_QUANTITY
+          - name: L_EXTENDEDPRICE
+          - name: L_DISCOUNT
+          - name: L_SHIPDATE
+
+      - name: supplier
+        columns:
+          - name: S_SUPPKEY
+            tests: [unique, not_null]
+          - name: S_NAME
+          - name: S_NATIONKEY
+
+      - name: nation
+        columns:
+          - name: N_NATIONKEY
+            tests: [unique, not_null]
+          - name: N_NAME
+          - name: N_REGIONKEY
+
+      - name: region
+        columns:
+          - name: R_REGIONKEY
+            tests: [unique, not_null]
+          - name: R_NAME

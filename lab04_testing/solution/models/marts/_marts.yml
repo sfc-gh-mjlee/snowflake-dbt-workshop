@@ -1,0 +1,49 @@
+version: 2
+
+models:
+  - name: fct_orders
+    description: "주문 팩트 테이블 (incremental)"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - order_id
+    columns:
+      - name: order_id
+        tests:
+          - unique
+          - not_null
+
+      - name: customer_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_customers')
+              field: customer_id
+              severity: warn
+
+      - name: order_total_price
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+      - name: order_status
+        tests:
+          - accepted_values:
+              values: ['O', 'F', 'P']
+
+  - name: dim_customers
+    description: "고객 디멘전 테이블"
+    columns:
+      - name: customer_id
+        tests:
+          - unique
+          - not_null
+
+      - name: nation_name
+        tests:
+          - not_null
+
+      - name: region_name
+        tests:
+          - not_null

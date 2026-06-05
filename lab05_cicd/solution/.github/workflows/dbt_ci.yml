@@ -1,0 +1,74 @@
+name: dbt CI
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'models/**'
+      - 'tests/**'
+      - 'macros/**'
+      - 'snapshots/**'
+      - 'dbt_project.yml'
+      - 'packages.yml'
+
+env:
+  DBT_PROFILES_DIR: ./
+  SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+  SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+  SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+  PR_NUMBER: ${{ github.event.pull_request.number }}
+
+jobs:
+  dbt-ci:
+    name: dbt Build & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dbt
+        run: pip install dbt-snowflake==1.8.*
+
+      - name: Install dbt packages
+        run: dbt deps
+
+      - name: Download prod artifacts (for Slim CI)
+        run: |
+          mkdir -p ./prod-artifacts
+          echo '{"metadata": {}, "nodes": {}, "sources": {}}' > ./prod-artifacts/manifest.json
+
+      - name: dbt debug
+        run: dbt debug --target ci
+
+      - name: dbt build (Slim CI)
+        run: |
+          dbt build \
+            --target ci \
+            --select state:modified+ \
+            --defer \
+            --state ./prod-artifacts/ \
+            --fail-fast
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-test-results-pr-${{ github.event.pull_request.number }}
+          path: |
+            target/run_results.json
+            target/manifest.json
+
+      - name: Cleanup CI schema
+        if: always()
+        run: |
+          dbt run-operation drop_schema \
+            --args "{schema: ci_${{ github.event.pull_request.number }}}" \
+            --target ci
