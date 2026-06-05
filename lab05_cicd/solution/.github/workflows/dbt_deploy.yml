@@ -1,0 +1,58 @@
+name: dbt Deploy to Snowflake
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'lab*/solution/models/**'
+      - 'lab*/solution/macros/**'
+      - 'lab*/solution/tests/**'
+      - 'lab*/solution/snapshots/**'
+      - 'lab*/solution/dbt_project.yml'
+      - 'lab*/solution/packages.yml'
+      - 'lab*/solution/profiles.yml'
+
+jobs:
+  deploy:
+    name: Deploy dbt project to Snowflake
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Snowflake CLI
+        run: pip install snowflake-cli
+
+      - name: Configure Snowflake connection
+        run: |
+          snow connection add workshop \
+            --account   "${{ secrets.SNOWFLAKE_ACCOUNT }}" \
+            --user      "${{ secrets.SNOWFLAKE_USER }}" \
+            --password  "${{ secrets.SNOWFLAKE_PASSWORD }}" \
+            --role      dbt_workshop_role \
+            --warehouse dbt_workshop_wh \
+            --database  dbt_workshop_db \
+            --schema    workshop
+
+      - name: Deploy dbt project
+        run: |
+          snow dbt deploy tpch_workshop \
+            --source     lab01_project_setup/solution \
+            --database   dbt_workshop_db \
+            --schema     workshop \
+            --connection workshop
+
+      - name: Verify deployment
+        run: |
+          snow dbt list \
+            --in schema workshop \
+            --database  dbt_workshop_db \
+            --connection workshop

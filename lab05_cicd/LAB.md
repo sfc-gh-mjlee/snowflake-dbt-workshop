@@ -1,417 +1,255 @@
-# Lab 05: CI/CD & 배포
+# Lab 05: 스케줄링 & 자동 배포
 
 **소요 시간:** 약 45분  
-**목표:** dev/prod 환경 분리 전략을 구성하고, GitHub Actions를 활용한 dbt Slim CI 파이프라인을 구축한다.
+**목표:** Snowflake Task로 dbt 실행을 자동화하고, GitHub Actions로 코드 변경 시 프로젝트를 자동 배포하는 파이프라인을 구성한다.
 
 ---
 
 ## 이론 (20분)
 
-### 환경 분리 전략
-
-운영 수준의 dbt 프로젝트는 최소 dev/prod 두 환경을 분리합니다.
+### 전체 운영 워크플로우
 
 ```
-개발자 로컬
-    │ dbt run --target dev
+개발자 코드 수정
+    │ git push to main
     ▼
-dev_<name>_staging.*      (개발 스키마)
-dev_<name>_marts.*
-
-    CI (PR 오픈 시 자동 실행)
-    │ dbt build --target ci --select state:modified+
+GitHub Actions
+    │ snow dbt deploy (자동 배포)
     ▼
-ci_<pr_number>_staging.*  (임시 스키마)
-ci_<pr_number>_marts.*
-
-    CD (main 브랜치 머지 후 자동 실행)
-    │ dbt build --target prod
+DBT PROJECT 오브젝트 업데이트 (Snowflake)
+    │ Snowflake Task (스케줄)
     ▼
-prod_staging.*            (운영 스키마)
-prod_marts.*
+EXECUTE DBT PROJECT 자동 실행
+    │
+    ▼
+결과 테이블 갱신
 ```
 
-### Slim CI: state:modified+ 선택자
+### Snowflake Task vs GitHub Actions 역할 분리
 
-dbt의 가장 강력한 CI 최적화 기법입니다.
+| 역할 | 도구 | 트리거 |
+|------|------|--------|
+| **코드 배포** | GitHub Actions | git push to main |
+| **정기 실행** | Snowflake Task | CRON 스케줄 |
+| **수동 실행** | Snowsight 워크시트 | 즉시 실행 |
 
-```bash
-# 1. 현재 prod 상태를 artifacts로 다운로드
-dbt ls --target prod   # manifest.json 생성
+### EXECUTE DBT PROJECT 문법 심화
 
-# 2. PR의 변경된 모델과 downstream만 실행
-dbt build --select state:modified+
-          --defer
-          --state path/to/prod/artifacts/
-```
+```sql
+-- 기본 실행
+EXECUTE DBT PROJECT <db>.<schema>.<project> ARGS='<command>';
 
-**동작 원리:**
-```
-main branch (prod)
-  stg_orders → fct_orders → rpt_monthly_sales  ← 변경 없음
-  stg_customers → dim_customers               ← 변경 없음
+-- 특정 dbt 버전 지정
+EXECUTE DBT PROJECT <db>.<schema>.<project>
+    DBT_VERSION='1.9.4'
+    ARGS='run';
 
-PR branch
-  stg_orders (변경됨!)
-     ↓ state:modified+
-  stg_orders → fct_orders → rpt_monthly_sales  ← 이것만 실행
-```
-
-**--defer 옵션:**  
-CI에서 직접 실행하지 않는 upstream 모델은  
-prod 환경의 테이블을 그대로 참조합니다. (CI 비용 절약)
-
-### dbt Cloud vs dbt Core + GitHub Actions
-
-| | dbt Cloud | dbt Core + GH Actions |
-|---|---|---|
-| **설정 난이도** | 낮음 (UI 기반) | 중간 (YAML 작성 필요) |
-| **비용** | 유료 (무료 플랜 있음) | GitHub Actions 비용만 |
-| **Slim CI** | 내장 지원 | 수동 구현 필요 |
-| **스케줄링** | UI에서 클릭 | cron 직접 설정 |
-| **CI 환경 격리** | 자동 | 수동 스키마 관리 |
-| **적합한 케이스** | 소규모~중규모 팀 | 자체 인프라 선호 팀 |
-
-### dbt Cloud Jobs 핵심 설정 (개요)
-
-```
-Job: Daily Production Run
-├── Environment: Production
-├── Commands:
-│   ├── dbt source freshness
-│   ├── dbt build --exclude tag:raw
-│   └── dbt test --store-failures
-├── Schedule: 0 6 * * * (매일 06:00 UTC)
-├── Generate docs: ✅
-└── Notifications: Slack #data-alerts
-
-Job: CI Check (PR 기반)
-├── Environment: CI
-├── Trigger: Pull Request
-├── Commands:
-│   └── dbt build --select state:modified+ --defer --state last-successful
-└── Fail fast: ✅
+-- 환경별 target 지정
+EXECUTE DBT PROJECT <db>.<schema>.<project>
+    ARGS='run --target prod';
 ```
 
 ---
 
 ## 실습
 
-### Step 1: profiles.yml 멀티 환경 설정 (5분)
+### Step 1: Snowflake Task로 정기 실행 설정 (15분)
 
-**`~/.dbt/profiles.yml` (멀티 환경 버전)**
+**일별 자동 실행 Task 생성:**
+
+```sql
+-- ① 전체 빌드 Task (매일 06:00 UTC)
+CREATE OR REPLACE TASK dbt_workshop_db.workshop.run_dbt_daily
+    WAREHOUSE   = dbt_workshop_wh
+    SCHEDULE    = 'USING CRON 0 6 * * * UTC'
+    COMMENT     = 'dbt 워크샵 프로젝트 일별 실행'
+AS
+EXECUTE DBT PROJECT dbt_workshop_db.workshop.tpch_workshop ARGS='build';
+
+-- ② Task 활성화 (기본은 비활성)
+ALTER TASK dbt_workshop_db.workshop.run_dbt_daily RESUME;
+
+-- ③ Task 상태 확인
+SHOW TASKS IN SCHEMA dbt_workshop_db.workshop;
+```
+
+**Task 즉시 수동 실행 (테스트용):**
+
+```sql
+EXECUTE TASK dbt_workshop_db.workshop.run_dbt_daily;
+```
+
+**실행 이력 확인:**
+
+```sql
+SELECT
+    name,
+    state,
+    scheduled_time,
+    completed_time,
+    error_message
+FROM TABLE(
+    INFORMATION_SCHEMA.TASK_HISTORY(
+        TASK_NAME => 'run_dbt_daily',
+        SCHEDULED_TIME_RANGE_START => dateadd('day', -1, current_timestamp())
+    )
+)
+ORDER BY scheduled_time DESC;
+```
+
+### Step 2: 단계별 Task 체인 구성 (15분)
+
+실제 운영에서는 단계별로 실행 순서를 제어합니다.
+
+```sql
+-- ① 소스 신선도 체크 Task (루트)
+CREATE OR REPLACE TASK dbt_workshop_db.workshop.dbt_check_freshness
+    WAREHOUSE = dbt_workshop_wh
+    SCHEDULE  = 'USING CRON 0 5 * * * UTC'
+AS
+EXECUTE DBT PROJECT dbt_workshop_db.workshop.tpch_workshop ARGS='run --select staging';
+
+-- ② Staging 완료 후 Marts 실행 (이전 Task 완료 시 트리거)
+CREATE OR REPLACE TASK dbt_workshop_db.workshop.dbt_run_marts
+    WAREHOUSE   = dbt_workshop_wh
+    AFTER       dbt_workshop_db.workshop.dbt_check_freshness
+AS
+EXECUTE DBT PROJECT dbt_workshop_db.workshop.tpch_workshop ARGS='run --select marts';
+
+-- ③ Marts 완료 후 테스트 실행
+CREATE OR REPLACE TASK dbt_workshop_db.workshop.dbt_run_tests
+    WAREHOUSE   = dbt_workshop_wh
+    AFTER       dbt_workshop_db.workshop.dbt_run_marts
+AS
+EXECUTE DBT PROJECT dbt_workshop_db.workshop.tpch_workshop ARGS='test --store-failures';
+
+-- ④ 전체 Task 체인 활성화
+ALTER TASK dbt_workshop_db.workshop.dbt_run_tests    RESUME;
+ALTER TASK dbt_workshop_db.workshop.dbt_run_marts    RESUME;
+ALTER TASK dbt_workshop_db.workshop.dbt_check_freshness RESUME;
+
+-- ⑤ Task 그래프 확인
+SELECT *
+FROM TABLE(INFORMATION_SCHEMA.TASK_DEPENDENTS(
+    TASK_NAME => 'dbt_workshop_db.workshop.dbt_check_freshness',
+    RECURSIVE => TRUE
+));
+```
+
+### Step 3: GitHub Actions 자동 배포 설정 (10분)
+
+`solution/.github/workflows/dbt_deploy.yml` 구조를 확인합니다.
+
+```sql
+-- GitHub에서 워크플로우 파일 확인
+SELECT $1
+FROM @dbt_workshop_db.workshop.dbt_workshop_repo/branches/main/lab05_cicd/solution/.github/workflows/dbt_deploy.yml
+    (FILE_FORMAT => (TYPE = 'CSV' FIELD_DELIMITER = NONE RECORD_DELIMITER = '\n'));
+```
+
+**핵심 워크플로우 구조:**
 
 ```yaml
-tpch_workshop:
-  target: dev
-  outputs:
-    dev:
-      type: snowflake
-      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
-      user: "{{ env_var('SNOWFLAKE_USER') }}"
-      password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
-      role: dbt_workshop_role
-      warehouse: dbt_workshop_wh
-      database: dbt_workshop_db
-      schema: "dev_{{ env_var('DBT_USER', 'local') }}"
-      threads: 4
-
-    ci:
-      type: snowflake
-      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
-      user: "{{ env_var('SNOWFLAKE_USER') }}"
-      password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
-      role: dbt_workshop_role
-      warehouse: dbt_workshop_wh
-      database: dbt_workshop_db
-      schema: "ci_{{ env_var('PR_NUMBER', 'local') }}"  # PR별 격리
-      threads: 8
-
-    prod:
-      type: snowflake
-      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
-      user: "{{ env_var('SNOWFLAKE_USER') }}"
-      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH') }}"
-      role: dbt_workshop_role
-      warehouse: dbt_workshop_wh
-      database: dbt_workshop_db
-      schema: prod
-      threads: 8
-```
-
-**로컬 환경 변수 설정 (.envrc 또는 .env 파일):**
-
-```bash
-# .env (git에 절대 커밋 금지! .gitignore에 추가 필수)
-export SNOWFLAKE_ACCOUNT="myorg-myaccount"
-export SNOWFLAKE_USER="dbt_workshop_user"
-export SNOWFLAKE_PASSWORD="Workshop1234!"
-export DBT_USER="mjlee"
-```
-
-### Step 2: .gitignore 설정 (5분)
-
-**`.gitignore`** (dbt 프로젝트 루트):
-
-```
-# dbt
-target/
-dbt_packages/
-logs/
-
-# 환경변수 & 비밀
-.env
-.env.*
-profiles.yml   # ~/.dbt/profiles.yml은 절대 repo에 넣지 마세요!
-*.pem
-*.p8
-
-# OS
-.DS_Store
-*.swp
-```
-
-### Step 3: GitHub Actions - PR CI 워크플로우 (15분)
-
-**`.github/workflows/dbt_ci.yml`**
-
-```yaml
-name: dbt CI
-
-on:
-  pull_request:
-    branches: [ main ]
-    paths:
-      - 'models/**'
-      - 'tests/**'
-      - 'macros/**'
-      - 'snapshots/**'
-      - 'dbt_project.yml'
-      - 'packages.yml'
-
-env:
-  DBT_PROFILES_DIR: ./
-  SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-  SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
-  SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
-  PR_NUMBER: ${{ github.event.pull_request.number }}
-
-jobs:
-  dbt-ci:
-    name: dbt Build & Test
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout PR branch
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install dbt
-        run: pip install dbt-snowflake==1.8.*
-
-      - name: Install dbt packages
-        run: dbt deps
-
-      - name: Download prod artifacts (for Slim CI)
-        # prod manifest를 캐시 또는 스토리지에서 다운로드
-        # 실제 운영에서는 S3/GCS 또는 dbt Cloud artifact API 사용
-        run: |
-          mkdir -p ./prod-artifacts
-          # 예시: AWS S3에서 다운로드
-          # aws s3 cp s3://my-bucket/dbt/manifest.json ./prod-artifacts/
-          echo '{"metadata": {}, "nodes": {}, "sources": {}}' > ./prod-artifacts/manifest.json
-
-      - name: dbt debug (연결 확인)
-        run: dbt debug --target ci
-
-      - name: dbt build (Slim CI - 변경된 모델과 downstream만)
-        run: |
-          dbt build \
-            --target ci \
-            --select state:modified+ \
-            --defer \
-            --state ./prod-artifacts/ \
-            --fail-fast
-
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: dbt-test-results-pr-${{ github.event.pull_request.number }}
-          path: |
-            target/run_results.json
-            target/manifest.json
-
-      - name: Cleanup CI schema
-        if: always()
-        run: |
-          dbt run-operation drop_schema \
-            --args "{schema: ci_${{ github.event.pull_request.number }}}" \
-            --target ci
-```
-
-### Step 4: GitHub Actions - Production 배포 워크플로우 (10분)
-
-**`.github/workflows/dbt_prod.yml`**
-
-```yaml
-name: dbt Production Deploy
+name: dbt Deploy to Snowflake
 
 on:
   push:
     branches: [ main ]
-  schedule:
-    - cron: '0 6 * * *'   # 매일 06:00 UTC 자동 실행
-
-env:
-  DBT_PROFILES_DIR: ./
-  SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-  SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
-  SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+    paths:
+      - 'lab*/solution/**'   # dbt 관련 파일 변경 시만 실행
 
 jobs:
-  dbt-production:
-    name: dbt Production Run
+  deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    environment: production   # GitHub Environment 보호 규칙 적용
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
+      - name: Install Snowflake CLI
+        run: pip install snowflake-cli
 
-      - name: Install dbt
-        run: pip install dbt-snowflake==1.8.*
-
-      - name: Install dbt packages
-        run: dbt deps
-
-      - name: dbt source freshness
-        run: dbt source freshness --target prod
-        continue-on-error: true   # freshness 실패해도 계속 진행 (경고만)
-
-      - name: dbt build (전체)
+      - name: Configure Snowflake connection
         run: |
-          dbt build \
-            --target prod \
-            --exclude tag:raw \
-            --store-failures
+          snow connection add workshop \
+            --account   ${{ secrets.SNOWFLAKE_ACCOUNT }} \
+            --user      ${{ secrets.SNOWFLAKE_USER }} \
+            --password  ${{ secrets.SNOWFLAKE_PASSWORD }} \
+            --role      dbt_workshop_role \
+            --warehouse dbt_workshop_wh \
+            --database  dbt_workshop_db
 
-      - name: dbt docs generate
-        run: dbt docs generate --target prod
-
-      - name: Upload artifacts to storage
-        # prod manifest.json을 저장소에 업로드 (Slim CI에서 사용)
+      - name: Deploy dbt project
         run: |
-          echo "Upload manifest.json to artifact storage"
-          # aws s3 cp target/manifest.json s3://my-bucket/dbt/manifest.json
+          snow dbt deploy tpch_workshop \
+            --source lab01_project_setup/solution \
+            --database dbt_workshop_db \
+            --schema workshop \
+            --connection workshop
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: dbt-prod-artifacts
-          path: |
-            target/manifest.json
-            target/run_results.json
-            target/catalog.json
-          retention-days: 30
-
-      - name: Notify on failure
-        if: failure()
-        run: |
-          echo "::error::dbt production run failed!"
-          # curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
-          #   -H 'Content-type: application/json' \
-          #   --data '{"text":"dbt prod run FAILED! Check GitHub Actions."}'
+      - name: Verify deployment
+        run: snow dbt list --in schema workshop --database dbt_workshop_db --connection workshop
 ```
 
-### Step 5: drop_schema 매크로 추가 (CI 정리용) (5분)
+**GitHub Secrets 설정 (저장소 → Settings → Secrets):**
 
-**`macros/drop_schema.sql`**
+```
+SNOWFLAKE_ACCOUNT   : <org>-<account>
+SNOWFLAKE_USER      : dbt_workshop_user
+SNOWFLAKE_PASSWORD  : Workshop1234!
+```
+
+---
+
+## 운영 모니터링
+
+### 실행 로그 확인
 
 ```sql
-{% macro drop_schema(schema) %}
-    {% set sql %}
-        DROP SCHEMA IF EXISTS {{ target.database }}.{{ schema }} CASCADE
-    {% endset %}
-    {% do run_query(sql) %}
-    {{ log("Dropped schema: " ~ schema, info=True) }}
-{% endmacro %}
+-- 최근 dbt 실행 이력 (Task 기반)
+SELECT
+    name,
+    state,
+    scheduled_time,
+    completed_time,
+    datediff('second', scheduled_time, completed_time) AS duration_sec,
+    error_message
+FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
+    SCHEDULED_TIME_RANGE_START => dateadd('day', -7, current_timestamp())
+))
+WHERE name LIKE '%DBT%'
+ORDER BY scheduled_time DESC;
 ```
 
----
+### Task 비활성화 (실습 종료 후)
 
-## CI/CD 파이프라인 전체 흐름
-
-```
-개발자 작업
-    │ git checkout -b feature/new-model
-    │ # 모델 작성 및 로컬 dbt run
-    │ git push origin feature/new-model
-    ▼
-GitHub PR 생성
-    │ (자동 트리거)
-    ▼
-[CI: dbt_ci.yml]
-    ├── dbt build --select state:modified+ --defer
-    ├── 테스트 통과 ✅ → PR merge 가능
-    └── 테스트 실패 ❌ → PR blocked, 수정 필요
-    ▼
-PR merge to main
-    │ (자동 트리거)
-    ▼
-[CD: dbt_prod.yml]
-    ├── dbt source freshness
-    ├── dbt build --target prod
-    ├── manifest.json S3 업로드 (다음 Slim CI에서 사용)
-    └── 실패 시 Slack 알림
-```
-
----
-
-## GitHub Secrets 설정 방법
-
-GitHub 저장소 → Settings → Secrets and variables → Actions:
-
-```
-SNOWFLAKE_ACCOUNT    : myorg-myaccount
-SNOWFLAKE_USER       : dbt_workshop_user
-SNOWFLAKE_PASSWORD   : Workshop1234!
-SLACK_WEBHOOK_URL    : https://hooks.slack.com/...  (선택)
-AWS_ACCESS_KEY_ID    : ...  (artifact 저장소 사용 시)
-AWS_SECRET_ACCESS_KEY: ...
+```sql
+-- 비용 발생 방지를 위해 Task 비활성화
+ALTER TASK dbt_workshop_db.workshop.dbt_check_freshness SUSPEND;
+ALTER TASK dbt_workshop_db.workshop.dbt_run_marts       SUSPEND;
+ALTER TASK dbt_workshop_db.workshop.dbt_run_tests       SUSPEND;
+ALTER TASK dbt_workshop_db.workshop.run_dbt_daily       SUSPEND;
 ```
 
 ---
 
 ## 검증 체크리스트
 
-- [ ] `profiles.yml`에 dev/ci/prod 3개 타겟 설정
-- [ ] `.gitignore`에 `profiles.yml`, `.env`, `target/` 포함
-- [ ] `dbt_ci.yml`: PR 트리거, `state:modified+`, `--defer` 옵션 포함
-- [ ] `dbt_prod.yml`: `main` push 및 cron 트리거 포함
-- [ ] `drop_schema` 매크로 작성 (CI 환경 정리용)
-- [ ] GitHub Secrets 설정 방법 이해
+- [ ] `run_dbt_daily` Task 생성 및 RESUME 상태 확인
+- [ ] `EXECUTE TASK` 수동 실행 성공
+- [ ] Task 이력에서 실행 시간 확인
+- [ ] 3단계 Task 체인 의존관계 확인 (`TASK_DEPENDENTS`)
+- [ ] GitHub Actions 워크플로우 구조 이해
+- [ ] 실습 종료 후 Task SUSPEND 완료
 
 ---
 
 ## 도전 과제
 
-1. `dbt_ci.yml`에 PR comment로 테스트 결과를 자동 게시하는 step을 추가해보세요.  
-   (GitHub API 또는 `actions/github-script` 활용)
-2. CI에서 `--fail-fast` 대신 `--no-fail-fast`를 사용하면 어떤 trade-off가 있나요?
-3. dbt Cloud의 "Continuous Integration" 기능과 직접 구현한 GitHub Actions의 장단점을 정리해보세요.
+1. 실패 알림 Task를 추가해보세요.  
+   `dbt_run_tests`가 실패하면 `SYSTEM$SEND_EMAIL()`로 알림을 보내는 Task를 연결하세요.
+2. `DBT_VERSION='1.9.4'`를 `EXECUTE DBT PROJECT`에 추가하면 어떤 효과가 있나요?  
+   버전을 고정하는 것이 왜 운영에서 중요한가요?
+3. Snowflake Git Integration을 사용하면 GitHub Actions 없이도  
+   코드 동기화를 할 수 있습니다. 어떤 SQL 명령으로 최신 코드를 가져올 수 있나요?
 
 ---
 

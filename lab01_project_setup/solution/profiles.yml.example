@@ -1,31 +1,24 @@
-# ~/.dbt/profiles.yml 에 저장하세요
-# (이 파일은 절대 git에 커밋하지 마세요 - 비밀번호 포함)
-
 tpch_workshop:
   target: dev
   outputs:
     dev:
       type: snowflake
-      account: "<YOUR_ORG>-<YOUR_ACCOUNT>"  # ex) myorg-myaccount
-      user: dbt_workshop_user
-      password: Workshop1234!
       role: dbt_workshop_role
       warehouse: dbt_workshop_wh
       database: dbt_workshop_db
-      schema: "dev_{{ env_var('DBT_USER', 'default') }}"
+      schema: workshop
       threads: 4
-      client_session_keep_alive: False
 
     prod:
       type: snowflake
-      account: "<YOUR_ORG>-<YOUR_ACCOUNT>"
-      user: dbt_workshop_user
-      # 프로덕션에서는 비밀번호 대신 키 쌍 인증 권장
-      private_key_path: "~/.ssh/dbt_rsa_key.p8"
-      private_key_passphrase: "{{ env_var('DBT_PRIVATE_KEY_PASSPHRASE') }}"
       role: dbt_workshop_role
       warehouse: dbt_workshop_wh
       database: dbt_workshop_db
-      schema: dbt
+      schema: prod
       threads: 8
-      client_session_keep_alive: False
+
+# ⚠️ Snowflake 네이티브 dbt 규칙:
+# - password, authenticator, account, user 필드 사용 금지
+# - env_var() 사용 금지
+# - 이 파일은 dbt_project.yml과 같은 폴더에 위치해야 합니다 (~/.dbt/ 아님)
+# - Snowflake가 실행 컨텍스트에서 연결을 직접 처리합니다
